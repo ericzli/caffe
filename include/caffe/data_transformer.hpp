@@ -127,6 +127,12 @@ class DataTransformer {
   vector<int> InferBlobShape(const cv::Mat& cv_img);
 #endif  // USE_OPENCV
 
+  //////////////// added by ericzli
+  void TransformInv(const Blob<Dtype>* blob, vector<cv::Mat>* cv_imgs);
+  void TransformInv(const Dtype* data, cv::Mat* cv_img, const int height,
+                    const int width, const int channels);
+  //////////////// end ericzli
+
  protected:
    /**
    * @brief Generates a random integer from Uniform({0, 1, ..., n-1}).

@@ -1,5 +1,9 @@
 #ifdef USE_OPENCV
 #include <opencv2/core/core.hpp>
+/////////////// add by ericzli
+#include <opencv2/imgproc/imgproc.hpp>
+#include <numeric>
+/////////////// end ericzli
 #endif  // USE_OPENCV
 
 #include <string>
@@ -539,6 +543,230 @@ int DataTransformer<Dtype>::Rand(int n) {
       static_cast<caffe::rng_t*>(rng_->generator());
   return ((*rng)() % n);
 }
+
+//////////////////// added by ericzli
+#ifdef USE_OPENCV
+static int roll_weighted_die(const vector<float>& probabilities) {
+  vector<float> cumulative;
+  std::partial_sum(&probabilities[0], &probabilities[0] + probabilities.size(),
+                   std::back_inserter(cumulative));
+  float val;
+  caffe_rng_uniform(1, static_cast<float>(0), cumulative.back(), &val);
+
+  // Find the position within the sequence and add 1
+  return (std::lower_bound(cumulative.begin(), cumulative.end(), val)
+          - cumulative.begin());
+}
+
+static cv::Mat AspectKeepingResizeBySmall(const cv::Mat& in_img,
+                                   const int new_width,
+                                   const int new_height,
+                                   const int interp_mode) {
+  cv::Mat img_resized;
+  float orig_aspect = static_cast<float>(in_img.cols) / in_img.rows;
+  float new_aspect = static_cast<float> (new_width) / new_height;
+
+  if (orig_aspect < new_aspect) {
+    int height = floor(static_cast<float>(new_width) / orig_aspect);
+    cv::resize(in_img, img_resized, cv::Size(new_width, height), 0, 0,
+               interp_mode);
+  } else {
+    int width = floor(orig_aspect * new_height);
+    cv::resize(in_img, img_resized, cv::Size(width, new_height), 0, 0,
+               interp_mode);
+  }
+  return img_resized;
+}
+
+static cv::Mat AspectKeepingResizeAndPad(const cv::Mat& in_img,
+                                  const int new_width, const int new_height,
+                                  const int pad_type,  const cv::Scalar pad_val,
+                                  const int interp_mode) {
+  cv::Mat img_resized;
+  float orig_aspect = static_cast<float>(in_img.cols) / in_img.rows;
+  float new_aspect = static_cast<float>(new_width) / new_height;
+
+  if (orig_aspect > new_aspect) {
+    int height = floor(static_cast<float>(new_width) / orig_aspect);
+    cv::resize(in_img, img_resized, cv::Size(new_width, height), 0, 0,
+               interp_mode);
+    cv::Size resSize = img_resized.size();
+    int padding = floor((new_height - resSize.height) / 2.0);
+    cv::copyMakeBorder(img_resized, img_resized, padding,
+                       new_height - resSize.height - padding, 0, 0,
+                       pad_type, pad_val);
+  } else {
+    int width = floor(orig_aspect * new_height);
+    cv::resize(in_img, img_resized, cv::Size(width, new_height), 0, 0,
+               interp_mode);
+    cv::Size resSize = img_resized.size();
+    int padding = floor((new_width - resSize.width) / 2.0);
+    cv::copyMakeBorder(img_resized, img_resized, 0, 0, padding,
+                       new_width - resSize.width - padding,
+                       pad_type, pad_val);
+  }
+  return img_resized;
+}
+
+static cv::Mat ApplyResize(const cv::Mat& in_img, const ResizeParameter& param) {
+  cv::Mat out_img;
+
+  // Reading parameters
+  const int new_height = param.height();
+  const int new_width = param.width();
+
+  int pad_mode = cv::BORDER_CONSTANT;
+  switch (param.pad_mode()) {
+    case ResizeParameter_Pad_mode_CONSTANT:
+      break;
+    case ResizeParameter_Pad_mode_MIRRORED:
+      pad_mode = cv::BORDER_REFLECT101;
+      break;
+    case ResizeParameter_Pad_mode_REPEAT_NEAREST:
+      pad_mode = cv::BORDER_REPLICATE;
+      break;
+    default:
+      LOG(FATAL) << "Unknown pad mode.";
+  }
+
+  int interp_mode = cv::INTER_LINEAR;
+  int num_interp_mode = param.interp_mode_size();
+  if (num_interp_mode > 0) {
+    vector<float> probs(num_interp_mode, 1.f / num_interp_mode);
+    int prob_num = roll_weighted_die(probs);
+    switch (param.interp_mode(prob_num)) {
+      case ResizeParameter_Interp_mode_AREA:
+        interp_mode = cv::INTER_AREA;
+        break;
+      case ResizeParameter_Interp_mode_CUBIC:
+        interp_mode = cv::INTER_CUBIC;
+        break;
+      case ResizeParameter_Interp_mode_LINEAR:
+        interp_mode = cv::INTER_LINEAR;
+        break;
+      case ResizeParameter_Interp_mode_NEAREST:
+        interp_mode = cv::INTER_NEAREST;
+        break;
+      case ResizeParameter_Interp_mode_LANCZOS4:
+        interp_mode = cv::INTER_LANCZOS4;
+        break;
+      default:
+        LOG(FATAL) << "Unknown interp mode.";
+    }
+  }
+
+  cv::Scalar pad_val = cv::Scalar(0, 0, 0);
+  const int img_channels = in_img.channels();
+  if (param.pad_value_size() > 0) {
+    CHECK(param.pad_value_size() == 1 ||
+          param.pad_value_size() == img_channels) <<
+        "Specify either 1 pad_value or as many as channels: " << img_channels;
+    vector<float> pad_values;
+    for (int i = 0; i < param.pad_value_size(); ++i) {
+      pad_values.push_back(param.pad_value(i));
+    }
+    if (img_channels > 1 && param.pad_value_size() == 1) {
+      // Replicate the pad_value for simplicity
+      for (int c = 1; c < img_channels; ++c) {
+        pad_values.push_back(pad_values[0]);
+      }
+    }
+    pad_val = cv::Scalar(pad_values[0], pad_values[1], pad_values[2]);
+  }
+
+  switch (param.resize_mode()) {
+    case ResizeParameter_Resize_mode_WARP:
+      cv::resize(in_img, out_img, cv::Size(new_width, new_height), 0, 0,
+                 interp_mode);
+      break;
+    case ResizeParameter_Resize_mode_FIT_LARGE_SIZE_AND_PAD:
+      out_img = AspectKeepingResizeAndPad(in_img, new_width, new_height,
+                                          pad_mode, pad_val, interp_mode);
+      break;
+    case ResizeParameter_Resize_mode_FIT_SMALL_SIZE:
+      out_img = AspectKeepingResizeBySmall(in_img, new_width, new_height,
+                                           interp_mode);
+      break;
+    default:
+      LOG(INFO) << "Unknown resize mode.";
+  }
+  return  out_img;
+}
+
+template<typename Dtype>
+void DataTransformer<Dtype>::TransformInv(const Dtype* data, cv::Mat* cv_img,
+                                          const int height, const int width,
+                                          const int channels) {
+  const Dtype scale = param_.scale();
+  const bool has_mean_file = param_.has_mean_file();
+  const bool has_mean_values = mean_values_.size() > 0;
+
+  Dtype* mean = NULL;
+  if (has_mean_file) {
+    CHECK_EQ(channels, data_mean_.channels());
+    CHECK_EQ(height, data_mean_.height());
+    CHECK_EQ(width, data_mean_.width());
+    mean = data_mean_.mutable_cpu_data();
+  }
+  if (has_mean_values) {
+    CHECK(mean_values_.size() == 1 || mean_values_.size() == channels) <<
+        "Specify either 1 mean_value or as many as channels: " << channels;
+    if (channels > 1 && mean_values_.size() == 1) {
+      // Replicate the mean_value for simplicity
+      for (int c = 1; c < channels; ++c) {
+        mean_values_.push_back(mean_values_[0]);
+      }
+    }
+  }
+
+  const int img_type = channels == 3 ? CV_8UC3 : CV_8UC1;
+  cv::Mat orig_img(height, width, img_type, cv::Scalar(0, 0, 0));
+  for (int h = 0; h < height; ++h) {
+    uchar* ptr = orig_img.ptr<uchar>(h);
+    int img_idx = 0;
+    for (int w = 0; w < width; ++w) {
+      for (int c = 0; c < channels; ++c) {
+        int idx = (c * height + h) * width + w;
+        if (has_mean_file) {
+          ptr[img_idx++] = static_cast<uchar>(data[idx] / scale + mean[idx]);
+        } else {
+          if (has_mean_values) {
+            ptr[img_idx++] =
+                static_cast<uchar>(data[idx] / scale + mean_values_[c]);
+          } else {
+            ptr[img_idx++] = static_cast<uchar>(data[idx] / scale);
+          }
+        }
+      }
+    }
+  }
+
+  if (param_.has_resize_param()) {
+    *cv_img = ApplyResize(orig_img, param_.resize_param());
+  } else {
+    *cv_img = orig_img;
+  }
+}
+
+template<typename Dtype>
+void DataTransformer<Dtype>::TransformInv(const Blob<Dtype>* blob,
+                                          vector<cv::Mat>* cv_imgs) {
+  const int channels = blob->channels();
+  const int height = blob->height();
+  const int width = blob->width();
+  const int num = blob->num();
+  CHECK_GE(num, 1);
+  const Dtype* image_data = blob->cpu_data();
+
+  for (int i = 0; i < num; ++i) {
+    cv::Mat cv_img;
+    TransformInv(image_data, &cv_img, height, width, channels);
+    cv_imgs->push_back(cv_img);
+    image_data += blob->offset(1);
+  }
+}
+#endif  // USE_OPENCV
+//////////////////// end ericzli
 
 INSTANTIATE_CLASS(DataTransformer);
 
